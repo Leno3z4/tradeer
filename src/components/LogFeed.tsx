@@ -30,7 +30,11 @@ export default function LogFeed({ log }: { log: LogEntry[] }) {
                     e.kind === "ok" ? "bg-mint-400" : e.kind === "err" ? "bg-rosex-400" : "bg-cy-400"
                   }`}
                 />
-                <span className={`w-11 shrink-0 font-semibold ${e.method === "GET" ? "text-cy-300" : "text-amberx-300"}`}>
+                <span
+                  className={`w-11 shrink-0 font-semibold ${
+                    e.method === "GET" ? "text-cy-300" : e.method === "AI" ? "text-mint-300" : "text-amberx-300"
+                  }`}
+                >
                   {e.method}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-ink-200">{e.path}</span>

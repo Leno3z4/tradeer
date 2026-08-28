@@ -19,6 +19,7 @@ export default function OrderTicket({
   onSubmit,
   busy,
   state,
+  notice,
 }: {
   markets: Market[];
   selected: Market | null;
@@ -27,6 +28,7 @@ export default function OrderTicket({
   onSubmit: (body: Record<string, unknown>) => void;
   busy: boolean;
   state: AccountState | null;
+  notice: { kind: "ok" | "err"; text: string } | null;
 }) {
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [type, setType] = useState(1);
@@ -213,6 +215,17 @@ export default function OrderTicket({
           )}
           {err && (
             <div className="rounded border border-rosex-500/40 bg-rosex-500/10 p-2.5 text-[11.5px] text-rosex-300">{err}</div>
+          )}
+          {notice && (
+            <div
+              className={`rounded border p-2.5 font-mono text-[10.5px] leading-relaxed ${
+                notice.kind === "ok"
+                  ? "border-mint-500/40 bg-mint-500/10 text-mint-300"
+                  : "border-rosex-500/40 bg-rosex-500/10 text-rosex-300"
+              }`}
+            >
+              {notice.text}
+            </div>
           )}
 
           <Btn variant={side === "buy" ? "mint" : "danger"} onClick={submit} disabled={busy || !canTrade} className="w-full py-2.5 text-[13px]">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LogOut, Plug, Power, RefreshCw } from "lucide-react";
+import { Activity, Bot, LogOut, Plug, Power, RefreshCw, SendHorizonal } from "lucide-react";
 import {
   ApiError,
   isOpen,
@@ -13,9 +13,13 @@ import MarketsPanel from "./MarketsPanel";
 import StatePanel from "./StatePanel";
 import OrderTicket, { KillModal } from "./OrderTicket";
 import LogFeed from "./LogFeed";
+import Copilot from "./Copilot";
 import { Btn, StatusPill } from "./shared";
 
 const POLL_MS = 5000;
+
+type Notice = { kind: "ok" | "err"; text: string } | null;
+type RightTab = "ticket" | "copilot" | "log";
 
 export default function Dashboard({
   backend,
@@ -37,6 +41,8 @@ export default function Dashboard({
   const [orderBusy, setOrderBusy] = useState(false);
   const [killOpen, setKillOpen] = useState(false);
   const [killBusy, setKillBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice>(null);
+  const [tab, setTab] = useState<RightTab>("copilot");
 
   const logId = useRef(0);
   const autoSelected = useRef(false);
@@ -100,9 +106,9 @@ export default function Dashboard({
     return () => clearInterval(iv);
   }, [autoRefresh, refresh]);
 
-  /* ----- actions (each re-verifies via fresh private state) ----- */
+  /* ----- actions: each verifies via fresh private state and returns a summary ----- */
   const placeOrder = useCallback(
-    async (body: Record<string, unknown>) => {
+    async (body: Record<string, unknown>): Promise<string> => {
       setOrderBusy(true);
       const t0 = performance.now();
       try {
@@ -111,16 +117,20 @@ export default function Dashboard({
       } catch (e) {
         const err = e instanceof ApiError ? e : new ApiError(0, "Order rejected.");
         addLog("POST", "/api/agent/perpl/order", "err", undefined, err.code ?? err.message.slice(0, 28));
+        await refresh();
+        throw err;
       } finally {
         setOrderBusy(false);
       }
+      // skill rule: verify every state-changing operation with fresh private state
       await refresh();
+      return `Order accepted (mkt ${body.mkt}, size ${body.s}, lev ${body.lv}x) and private state re-verified — check open orders / positions for the fill.`;
     },
     [backend, addLog, refresh],
   );
 
   const cancelOrder = useCallback(
-    async (o: Order) => {
+    async (o: Order): Promise<string> => {
       setBusyOid(o.oid ?? null);
       const t0 = performance.now();
       try {
@@ -129,12 +139,24 @@ export default function Dashboard({
       } catch (e) {
         const err = e instanceof ApiError ? e : new ApiError(0, "Cancel failed.");
         addLog("POST", "/api/agent/perpl/order/cancel", "err", undefined, err.code ?? err.message.slice(0, 28));
+        await refresh();
+        throw err;
       } finally {
         setBusyOid(null);
       }
       await refresh();
+      return `Cancel for oid ${o.oid} sent with lb and verified against fresh private state.`;
     },
     [backend, addLog, refresh],
+  );
+
+  const cancelByOid = useCallback(
+    async (oid: string | number): Promise<string> => {
+      const o = (acct?.open_orders ?? []).find((x) => String(x.oid) === String(oid));
+      if (!o) return `ERROR: oid ${oid} not found in the current open orders — refresh and retry.`;
+      return cancelOrder(o);
+    },
+    [acct, cancelOrder],
   );
 
   const modifyOrder = useCallback(
@@ -163,7 +185,7 @@ export default function Dashboard({
     [backend, addLog, refresh],
   );
 
-  const kill = useCallback(async () => {
+  const kill = useCallback(async (): Promise<string> => {
     setKillBusy(true);
     const t0 = performance.now();
     try {
@@ -172,11 +194,26 @@ export default function Dashboard({
     } catch (e) {
       const err = e instanceof ApiError ? e : new ApiError(0, "Kill switch failed.");
       addLog("POST", "/api/agent/perpl/kill-switch", "err", undefined, err.code ?? err.message.slice(0, 28));
+      await refresh();
+      throw err;
     } finally {
       setKillBusy(false);
     }
     await refresh();
+    return "Kill switch executed — active orders cancelled, positions closed, account verified via fresh state.";
   }, [backend, addLog, refresh]);
+
+  const submitFromTicket = useCallback(
+    (body: Record<string, unknown>) => {
+      setNotice(null);
+      placeOrder(body)
+        .then((s) => setNotice({ kind: "ok", text: s }))
+        .catch((e) =>
+          setNotice({ kind: "err", text: e instanceof ApiError ? `${e.code ? `[${e.code}] ` : ""}${e.message}` : "Order failed." }),
+        );
+    },
+    [placeOrder],
+  );
 
   const marketsById = useMemo(() => {
     const m = new Map<number, Market>();
@@ -195,6 +232,12 @@ export default function Dashboard({
       return backend.base;
     }
   }, [backend]);
+
+  const tabs: { id: RightTab; label: string; icon: React.ReactNode }[] = [
+    { id: "copilot", label: "Copilot", icon: <Bot size={13} /> },
+    { id: "ticket", label: "Ticket", icon: <SendHorizonal size={13} /> },
+    { id: "log", label: "Activity", icon: <Activity size={13} /> },
+  ];
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -280,20 +323,53 @@ export default function Dashboard({
             />
           </div>
 
-          <div className="flex min-h-0 flex-col gap-4 lg:col-span-2 xl:col-span-1 xl:h-[calc(100vh-104px)]">
-            <div className="min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
-              <OrderTicket
-                markets={markets}
-                selected={selected}
-                selectedId={selectedId}
-                onSelect={setSelectedId}
-                onSubmit={placeOrder}
-                busy={orderBusy}
-                state={acct}
-              />
+          {/* right rail: tabbed — copilot / ticket / activity (kept mounted to preserve state) */}
+          <div className="flex min-h-0 flex-col gap-3 lg:col-span-2 xl:col-span-1 xl:h-[calc(100vh-104px)]">
+            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-ink-700 bg-ink-850/85 p-1">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTab(t.id)}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1.5 font-mono text-[10.5px] font-semibold uppercase tracking-[0.14em] transition-all ${
+                    tab === t.id
+                      ? "bg-cy-500/15 text-cy-300 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.35)]"
+                      : "text-ink-400 hover:text-ink-200"
+                  }`}
+                >
+                  {t.icon}
+                  {t.label}
+                  {t.id === "copilot" && tab !== "copilot" && <span className="h-1.5 w-1.5 rounded-full bg-cy-400 dot-live" />}
+                </button>
+              ))}
             </div>
-            <div className="h-64 shrink-0 xl:h-60">
-              <LogFeed log={log} />
+
+            <div className="min-h-[540px] flex-1 xl:min-h-0">
+              <div className={tab === "copilot" ? "h-full" : "hidden"}>
+                <Copilot
+                  markets={markets}
+                  acct={acct}
+                  onPlaceOrder={placeOrder}
+                  onCancelOid={cancelByOid}
+                  onKill={kill}
+                  pushLog={addLog}
+                />
+              </div>
+              <div className={tab === "ticket" ? "h-full overflow-y-auto pr-1" : "hidden"}>
+                <OrderTicket
+                  markets={markets}
+                  selected={selected}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  onSubmit={submitFromTicket}
+                  busy={orderBusy}
+                  state={acct}
+                  notice={notice}
+                />
+              </div>
+              <div className={tab === "log" ? "h-full" : "hidden"}>
+                <LogFeed log={log} />
+              </div>
             </div>
           </div>
         </div>
@@ -304,7 +380,7 @@ export default function Dashboard({
           onClose={() => !killBusy && setKillOpen(false)}
           onConfirm={() => {
             setKillOpen(false);
-            kill();
+            kill().catch(() => undefined);
           }}
         />
       )}
